@@ -56,6 +56,7 @@ class hyp:  # changing these will theoretically impact the performace of the mod
     LOG_REBUF_PENALTY: float = 2.66
     HD_REBUF_PENALTY: float = 8.0
     SMOOTH_PENALTY: float = 1.0
+    QOE_METRIC: str = 'lin'  # other options are 'log' and 'hd'
     DIFFICULTY_LVL: float = 0.1
 
 @dataclass
@@ -70,14 +71,14 @@ class par:  # variables that are not directly related to the model and its perfo
     save_num: int = len(set([name[:4] for name in os.listdir(SAVE_DIR)])) + 1 if Path(SAVE_DIR).exists() else 0
     SAVE_NUM: str = '0' * (4 - len(str(save_num))) + str(save_num)
     CURR_FILE_PATH: str = os.path.realpath(__file__)
-    LOAD_MODEL: bool = True
+    LOAD_MODEL: bool = False
     ADV_ACTOR_PATH: str = r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_adversary_a3c_pensieve-3/0001-adv-chkpt-actor-550'
     PRO_ACTOR_PATH: str = ADV_ACTOR_PATH.replace('-adv-', '-pro-')
     ADV_CRITIC_PATH: str = ADV_ACTOR_PATH.replace('-actor-', '-critic-')
     PRO_CRITIC_PATH: str = PRO_ACTOR_PATH.replace('-actor-', '-critic-')
     EPOCH_START: int = int(ADV_ACTOR_PATH.split('-')[-1]) if LOAD_MODEL else 0
     RAW_SCORE_FILE: str = SAVE_DIR + SAVE_NUM + '-raw-score'
-    OFFSET: float = 5000  # this is added to the pro reward to ensure it is always positive so that the protagonist and adversary are optimizing the right objective.
+    OFFSET: float = 8000  # this is added to the pro reward to ensure it is always positive so that the protagonist and adversary are optimizing the right objective.
 
 
 class Actor(nn.Module):
@@ -275,7 +276,7 @@ def agent(i, is_pro, parameter_queue, experience_queue, pro_actions_queue, adv_a
 
             if not is_pro:
                 reward = -reward
-            score += reward - par.OFFSET  # I subtract it here so that what we see is representative of the actual scores but what is fed to the model is the offset score.
+            score += reward - (par.OFFSET if is_pro else -1 * par.OFFSET) # I subtract it here so that what we see is representative of the actual scores but what is fed to the model is the offset score.
 
             states.append(state)
             actions.append(curr_bitrate_idx)
@@ -283,6 +284,8 @@ def agent(i, is_pro, parameter_queue, experience_queue, pro_actions_queue, adv_a
 
         experience_queue.put([states, actions, rewards, end_of_video])
         scores.append(score)
+        if ((epoch + 1) == 10) and (10 % par.PRINT_EVERY != 0):  # just to ensure it is working   
+            print('epoch', par.EPOCH_START + epoch + 1, '/', par.EPOCH_START + hyp.NUM_EPOCHS, 'agent', i, 'type', 'pro' if is_pro else 'adv', datetime.today().strftime('%d %b %Y %H:%M:%S %p'))
         if (epoch + 1) % par.PRINT_EVERY == 0:
             print('epoch', par.EPOCH_START + epoch + 1, '/', par.EPOCH_START + hyp.NUM_EPOCHS, 'agent', i, 'type', 'pro' if is_pro else 'adv', datetime.today().strftime('%d %b %Y %H:%M:%S %p'))
     with open(par.RAW_SCORE_FILE + ('-pro' if is_pro else '-adv') + '-w' + str(i) + '.csv', 'w') as f:

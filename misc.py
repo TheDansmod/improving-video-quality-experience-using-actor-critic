@@ -177,6 +177,34 @@ def raw_vs_smooth_scores():
     plt.ylim([-10,20])
     # plt.show()
 
+def min_val_a3c():
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    path0 = '/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_adversary_a3c_pensieve-4/0005-raw-score-pro-w0.csv'
+    path1 = '/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_adversary_a3c_pensieve-4/0006-raw-score-pro-w0.csv'
+    df0 = pd.read_csv(path0)
+    df1 = pd.read_csv(path1)
+    df = pd.concat([df0, df1])
+    scores = moving_average(df['score'].values, 1000)
+    print(max(df['score']))
+    print(max(scores))
+    plt.plot(list(range(1, len(scores) + 1)), scores)
+    plt.xlabel('epoch')
+    plt.ylabel('score')
+    plt.show()
+
+    dfA = pd.DataFrame({
+        'A': [1, 2, 3, 4],
+        'B': [5, 6, 7, 8]})
+    dfB = pd.DataFrame({
+        'A': [10, 11, 12, 13],
+        'B': [14, 15, 16, 17]})
+    # print(dfA)
+    # print(dfB)
+    # print(pd.concat([dfA, dfB]))
+
+
+
 if __name__ == '__main__':
     # dataclassTest()
     # queue_1() 
@@ -192,4 +220,5 @@ if __name__ == '__main__':
     # monitor()
     # numpy_avg()
     # filename()
-    raw_vs_smooth_scores()
+    # raw_vs_smooth_scores()
+    min_val_a3c()
