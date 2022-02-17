@@ -36,7 +36,7 @@ class cons:
 
 @dataclass
 class hyp:  # changing these will theoretically impact the performace of the model
-    NUM_EPOCHS: int = 50
+    NUM_EPOCHS: int = 10000
     ACTOR_LR: float = 0.0001
     CRITIC_LR: float = 0.001
     NUM_AGENTS: int = 2
@@ -52,14 +52,16 @@ class hyp:  # changing these will theoretically impact the performace of the mod
     DISCOUNT_FACTOR: float = 0.99
     INIT_ENTROPY_WT: float = 1.0
     FINAL_ENTROPY_WT: float = 0.1
-    REBUF_PENALTY: float = 4.3
+    LIN_REBUF_PENALTY: float = 4.3
+    LOG_REBUF_PENALTY: float = 2.66
+    HD_REBUF_PENALTY: float = 8.0
     SMOOTH_PENALTY: float = 1.0
     DIFFICULTY_LVL: float = 0.1
 
 @dataclass
 class par:  # variables that are not directly related to the model and its performance
-    PRINT_EVERY: int = min(100, hyp.NUM_EPOCHS // 10)
-    MODEL_SAVE_EVERY: int = min(1000, hyp.NUM_EPOCHS // 5)
+    PRINT_EVERY: int = hyp.NUM_EPOCHS // 10
+    MODEL_SAVE_EVERY: int = hyp.NUM_EPOCHS // 5
     DATA_PATH: str = r'/mnt/windows_d/Svalbard/Data/Thesis/pensieve_data/cooked_traces/'
     TIMING_DATA: tuple = tuple(load_trace.load_trace(DATA_PATH)[0])
     THROUGHPUT_DATA: tuple = tuple(load_trace.load_trace(DATA_PATH)[1])
@@ -69,11 +71,13 @@ class par:  # variables that are not directly related to the model and its perfo
     SAVE_NUM: str = '0' * (4 - len(str(save_num))) + str(save_num)
     CURR_FILE_PATH: str = os.path.realpath(__file__)
     LOAD_MODEL: bool = True
-    ADV_ACTOR_PATH: str = r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_adversary_a3c_pensieve-2/0009-adv-chkpt-actor-500'
+    ADV_ACTOR_PATH: str = r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_adversary_a3c_pensieve-3/0001-adv-chkpt-actor-550'
     PRO_ACTOR_PATH: str = ADV_ACTOR_PATH.replace('-adv-', '-pro-')
     ADV_CRITIC_PATH: str = ADV_ACTOR_PATH.replace('-actor-', '-critic-')
     PRO_CRITIC_PATH: str = PRO_ACTOR_PATH.replace('-actor-', '-critic-')
     EPOCH_START: int = int(ADV_ACTOR_PATH.split('-')[-1]) if LOAD_MODEL else 0
+    RAW_SCORE_FILE: str = SAVE_DIR + SAVE_NUM + '-raw-score'
+    OFFSET: float = 5000  # this is added to the pro reward to ensure it is always positive so that the protagonist and adversary are optimizing the right objective.
 
 
 class Actor(nn.Module):
@@ -257,13 +261,21 @@ def agent(i, is_pro, parameter_queue, experience_queue, pro_actions_queue, adv_a
                 curr_bitrate_idx = round(hyp.DIFFICULTY_LVL * curr_bitrate_idx + (1 - hyp.DIFFICULTY_LVL) * pro_curr_bitrate_idx)
             delay, sleep_time, buffer_size, rebuf, video_chunk_size, next_video_chunk_sizes, end_of_video, video_chunk_remain = environ.get_video_chunk(curr_bitrate_idx)
 
-            bitrate_reward = cons.VID_BITRATES[curr_bitrate_idx] / 1000.0
-            rebuf_penalty = hyp.REBUF_PENALTY * rebuf
+            if hyp.QOE_METRIC == 'lin':
+                bitrate_reward = cons.VID_BITRATES[curr_bitrate_idx] / 1000.0
+                rebuf_penalty = hyp.LIN_REBUF_PENALTY * rebuf
+            elif hyp.QOE_METRIC == 'log':
+                bitrate_reward = np.log(cons.VID_BITRATES[curr_bitrate_idx] / float(min(cons.VID_BITRATES)))  # DBT: here I am not dividing by 1000 since it is a ratio
+                rebuf_penalty = hyp.LOG_REBUF_PENALTY * rebuf
+            else:
+                bitrate_reward = cons.HD_REWARD[curr_bitrate_idx]
+                rebuf_penalty = hyp.HD_REBUF_PENALTY * rebuf
             smooth_penalty = hyp.SMOOTH_PENALTY * np.abs(cons.VID_BITRATES[curr_bitrate_idx] - cons.VID_BITRATES[prev_bitrate_idx]) / 1000.0
-            reward = bitrate_reward - rebuf_penalty - smooth_penalty
+            reward = bitrate_reward - rebuf_penalty - smooth_penalty + par.OFFSET
+
             if not is_pro:
                 reward = -reward
-            score += reward
+            score += reward - par.OFFSET  # I subtract it here so that what we see is representative of the actual scores but what is fed to the model is the offset score.
 
             states.append(state)
             actions.append(curr_bitrate_idx)
@@ -273,10 +285,14 @@ def agent(i, is_pro, parameter_queue, experience_queue, pro_actions_queue, adv_a
         scores.append(score)
         if (epoch + 1) % par.PRINT_EVERY == 0:
             print('epoch', par.EPOCH_START + epoch + 1, '/', par.EPOCH_START + hyp.NUM_EPOCHS, 'agent', i, 'type', 'pro' if is_pro else 'adv', datetime.today().strftime('%d %b %Y %H:%M:%S %p'))
+    with open(par.RAW_SCORE_FILE + ('-pro' if is_pro else '-adv') + '-w' + str(i) + '.csv', 'w') as f:
+        f.write('epoch,score\n')
+        for ind, val in enumerate(scores):
+            f.write(str(ind + 1) + ',' + str(val) + '\n')
     scores = moving_average(scores, n=par.SMOOTHING_AMT)
     plot(is_pro, str(i), scores)
 
-def moving_average(a, n=par.SMOOTHING_AMT) :
+def moving_average(a, n=par.SMOOTHING_AMT):
     ret = np.cumsum(np.array(a), dtype=float)
     ret[n:] = ret[n:] - ret[:-n]
     return ret[n - 1:] / n

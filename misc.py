@@ -141,6 +141,41 @@ def filename():
         os.mkdir(Path(path1))
     print('created ', Path(path1))
 
+def moving_average(a, n):
+    import numpy as np
+    ret = np.cumsum(a, dtype=float)
+    ret[n:] = ret[n:] - ret[:-n]
+    return ret[n - 1:] / n
+
+def raw_vs_smooth_scores():
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import numpy as np
+    path1 = r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_pensieve-3-async/0014-raw-score-w0.csv'
+    path2 = r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_pensieve-3-async/0014-raw-score-w1.csv'
+    path3 = r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_pensieve-3-async/0014-raw-score-w2.csv'
+    path4 = r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_pensieve-3-async/0014-raw-score-w3.csv'
+    df1 = pd.read_csv(path1)
+    df2 = pd.read_csv(path2)
+    df3 = pd.read_csv(path3)
+    df4 = pd.read_csv(path4)
+    print(np.std(df1['score']))
+    print(np.std(df2['score']))
+    print(np.std(df3['score']))
+    print(np.std(df4['score']))
+    score1 = moving_average(df1['score'].values, 200)
+    score2 = moving_average(df2['score'].values, 200)
+    score3 = moving_average(df3['score'].values, 200)
+    score4 = moving_average(df4['score'].values, 200)
+    plt.plot(list(range(1, len(score1) + 1)), score1, label='w0')
+    plt.plot(list(range(1, len(score1) + 1)), score2, label='w1')
+    plt.plot(list(range(1, len(score1) + 1)), score3, label='w2')
+    plt.plot(list(range(1, len(score1) + 1)), score4, label='w3')
+    plt.xlabel('epoch')
+    plt.ylabel('score')
+    plt.legend()
+    plt.ylim([-10,20])
+    # plt.show()
 
 if __name__ == '__main__':
     # dataclassTest()
@@ -156,4 +191,5 @@ if __name__ == '__main__':
     # spawn()
     # monitor()
     # numpy_avg()
-    filename()
+    # filename()
+    raw_vs_smooth_scores()

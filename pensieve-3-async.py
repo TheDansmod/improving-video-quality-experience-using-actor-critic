@@ -12,9 +12,11 @@ import load_trace  # this is a file load_trace.py
 import random
 import matplotlib.pyplot as plt
 import os
-import time 
+import time
 import shutil
 import psutil
+from datetime import datetime
+from pathlib import Path
 
 
 @dataclass
@@ -32,8 +34,8 @@ class cons:
 
 
 @dataclass
-class hyp:  # changing these will theoretically impact the performace of the model
-    NUM_EPOCHS: int = 500
+class hyp:  # changing these will theoretically impact the performance of the model
+    NUM_EPOCHS: int = 5000
     ACTOR_LR: float = 0.0001
     CRITIC_LR: float = 0.001
     NUM_AGENTS: int = 4
@@ -49,20 +51,29 @@ class hyp:  # changing these will theoretically impact the performace of the mod
     DISCOUNT_FACTOR: float = 0.99
     INIT_ENTROPY_WT: float = 1.0
     FINAL_ENTROPY_WT: float = 0.1
-    REBUF_PENALTY: float = 4.3
+    LIN_REBUF_PENALTY: float = 4.3
+    LOG_REBUF_PENALTY: float = 2.66
+    HD_REBUF_PENALTY: float = 8.0
     SMOOTH_PENALTY: float = 1.0
+    QOE_METRIC: str = 'lin' # other options are 'log' and 'hd'
 
 @dataclass
 class par:  # variables that are not directly related to the model and its performance
-    PRINT_EVERY: int = hyp.NUM_EPOCHS // 5
+    PRINT_EVERY: int = hyp.NUM_EPOCHS // 10
+    MODEL_SAVE_EVERY: int = hyp.NUM_EPOCHS // 5
     DATA_PATH: str = r'/mnt/windows_d/Svalbard/Data/Thesis/pensieve_data/cooked_traces/'
     TIMING_DATA: tuple = tuple(load_trace.load_trace(DATA_PATH)[0])
     THROUGHPUT_DATA: tuple = tuple(load_trace.load_trace(DATA_PATH)[1])
     SMOOTHING_AMT: int = hyp.NUM_EPOCHS // 10
-    SAVE_DIR: str = r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_pensieve-3/'
-    save_num: int = len(set([name[:4] for name in os.listdir(SAVE_DIR)])) + 1
+    SAVE_DIR: str = r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_' + Path(os.path.basename(__file__)).stem + '/'
+    save_num: int = len(set([name[:4] for name in os.listdir(SAVE_DIR)])) + 1 if Path(SAVE_DIR).exists() else 0
     SAVE_NUM: str = '0' * (4 - len(str(save_num))) + str(save_num)
     CURR_FILE_PATH: str = os.path.realpath(__file__)
+    LOAD_MODEL: bool = False
+    ACTOR_PATH: str = r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_pensieve-3-async/0011-chkpt-actor-50'
+    CRITIC_PATH: str = ACTOR_PATH.replace('-actor-', '-critic-')
+    EPOCH_START: int = int(ACTOR_PATH.split('-')[-1]) if LOAD_MODEL else 0
+    RAW_SCORE_FILE: str = SAVE_DIR + SAVE_NUM + '-raw-score'
 
 class Actor(nn.Module):
     def __init__(self):
@@ -146,10 +157,10 @@ def set_seeds():
 
 def central_agent(parameter_queue, experience_queue):
     torch.set_num_threads(1)
-    actor = Actor()
+    actor = torch.load(par.ACTOR_PATH) if par.LOAD_MODEL else Actor()
     actor_criterion = RMSprop(actor.parameters(), lr=hyp.ACTOR_LR, alpha=hyp.RMSPROP_ALPHA, eps=hyp.RMSPROP_EPS)
     actor_criterion.zero_grad()
-    critic = Critic()
+    critic = torch.load(par.CRITIC_PATH) if par.LOAD_MODEL else Critic()
     critic_criterion = RMSprop(critic.parameters(), lr=hyp.CRITIC_LR, alpha=hyp.RMSPROP_ALPHA, eps=hyp.RMSPROP_EPS)
     critic_criterion.zero_grad()
     critic_loss_fn = nn.MSELoss()
@@ -190,6 +201,9 @@ def central_agent(parameter_queue, experience_queue):
         actor_criterion.zero_grad()
         critic_criterion.step()
         critic_criterion.zero_grad()
+        if (epoch +1) % par.MODEL_SAVE_EVERY == 0:
+            torch.save(actor, par.SAVE_DIR + par.SAVE_NUM + '-chkpt-actor-' + str(par.EPOCH_START + epoch + 1))
+            torch.save(critic, par.SAVE_DIR + par.SAVE_NUM + '-chkpt-critic-' + str(par.EPOCH_START + epoch + 1))
 
 def agent(i, parameter_queue, experience_queue):
     torch.set_num_threads(1)
@@ -230,8 +244,15 @@ def agent(i, parameter_queue, experience_queue):
 
             delay, sleep_time, buffer_size, rebuf, video_chunk_size, next_video_chunk_sizes, end_of_video, video_chunk_remain = environ.get_video_chunk(curr_bitrate_idx)
 
-            bitrate_reward = cons.VID_BITRATES[curr_bitrate_idx] / 1000.0
-            rebuf_penalty = hyp.REBUF_PENALTY * rebuf
+            if hyp.QOE_METRIC == 'lin':
+                bitrate_reward = cons.VID_BITRATES[curr_bitrate_idx] / 1000.0
+                rebuf_penalty = hyp.LIN_REBUF_PENALTY * rebuf
+            elif hyp.QOE_METRIC == 'log':
+                bitrate_reward = np.log(cons.VID_BITRATES[curr_bitrate_idx] / float(min(cons.VID_BITRATES)))  # DBT: here I am not dividing by 1000 since it is a ratio
+                rebuf_penalty = hyp.LOG_REBUF_PENALTY * rebuf
+            else:
+                bitrate_reward = cons.HD_REWARD[curr_bitrate_idx]
+                rebuf_penalty = hyp.HD_REBUF_PENALTY * rebuf
             smooth_penalty = hyp.SMOOTH_PENALTY * np.abs(cons.VID_BITRATES[curr_bitrate_idx] - cons.VID_BITRATES[prev_bitrate_idx]) / 1000.0
             reward = bitrate_reward - rebuf_penalty - smooth_penalty
             score += reward
@@ -243,7 +264,11 @@ def agent(i, parameter_queue, experience_queue):
         experience_queue.put([states, actions, rewards, end_of_video])
         scores.append(score)
         if (epoch + 1) % par.PRINT_EVERY == 0:
-            print('epoch', epoch + 1, 'agent', i)
+            print('epoch', par.EPOCH_START + epoch + 1, '/', par.EPOCH_START + hyp.NUM_EPOCHS, 'agent', i, datetime.today().strftime('%d %b %Y %H:%M:%S %p'))
+    with open(par.RAW_SCORE_FILE + '-w' + str(i) + '.csv', 'w') as f:
+        f.write('epoch,score\n')
+        for ind, val in enumerate(scores):
+            f.write(str(ind + 1) + ',' + str(val) + '\n')
     scores = moving_average(scores, n=par.SMOOTHING_AMT)
     plot(str(i), scores)
 
@@ -255,7 +280,7 @@ def moving_average(a, n=par.SMOOTHING_AMT):
 def plot(name, scores):
     ylim_path = par.SAVE_DIR + par.SAVE_NUM + '-score-zoom_w' + name + '.png'
     full_path = par.SAVE_DIR + par.SAVE_NUM + '-score-full-w' + name + '.png'
-    plt.plot([i for i in range(1, len(scores) + 1)], scores)
+    plt.plot([i for i in range(par.EPOCH_START + 1, par.EPOCH_START + len(scores) + 1)], scores)
     plt.xlabel('episode')
     plt.ylabel('score')
     plt.title('worker ' + name)
@@ -284,7 +309,7 @@ def save_state(time_taken, monitor_queue):
         else:
             temp.append(value)
         idx += 1
-    smoothing_amount = len(cpu) // 10
+    smoothing_amount = max(len(cpu) // 10, 1)
     smooth_cpu = moving_average(cpu, n=smoothing_amount)
     plt.plot(list(range(1, len(smooth_cpu) + 1)), smooth_cpu)
     plt.xlabel('time in secs')
@@ -321,9 +346,15 @@ def monitor_fn(training_ongoing, monitor_queue):
         monitor_queue.put(round(virt_mem_used, 2))
         monitor_queue.put(np.mean(temps))
 
+def create_save_dir():
+    path = Path(par.SAVE_DIR)
+    if not path.is_dir():
+        os.mkdir(path)
+        print('created directory to save runs in:', path)
 
 if __name__ == '__main__':
-    set_seeds()
+    # set_seeds()
+    create_save_dir()
     start_time = time.perf_counter()
     parameter_queue = mp.Queue()
     experience_queue = mp.Queue()
@@ -346,7 +377,11 @@ if __name__ == '__main__':
         process.join()
 
     time_taken = time.perf_counter() - start_time
-    
+
     training_ongoing.value = 0
+    # Sometimes the process does not end for some reason, so I am forcibly terminating it
+    time.sleep(2)  # allow the process to end on its own
+    monitor_process.terminate()
     monitor_process.join()
+    print('monitor_done')
     save_state(time_taken, monitor_queue)
