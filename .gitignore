@@ -1,1 +1,11 @@
 __pycache__/
+results/
+runs_adversary_a3c_pensieve-1/
+runs_adversary_a3c_pensieve-2/
+runs_adversary_a3c_pensieve-3/
+runs_adversary_a3c_pensieve-4/
+runs_pendulum-a3c-1/
+runs_pensieve-2/
+runs_pensieve-3-async/
+runs_pensieve-4/
+runs_pensieve-5/

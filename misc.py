@@ -177,21 +177,39 @@ def raw_vs_smooth_scores():
     plt.ylim([-10,20])
     # plt.show()
 
+def running_average(a):
+    import numpy as np
+    n = len(a)
+    a_csum = np.cumsum(a, dtype=float)
+    n_sum = np.cumsum(np.ones(n))
+    return a_csum / n_sum
+
 def min_val_a3c():
     import pandas as pd
     import matplotlib.pyplot as plt
-    path0 = '/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_adversary_a3c_pensieve-4/0005-raw-score-pro-w0.csv'
-    path1 = '/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_adversary_a3c_pensieve-4/0006-raw-score-pro-w0.csv'
+    import numpy as np
+    path0 = '/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_adversary_a3c_pensieve-4/0007-raw-score-pro-w0.csv'
+    path1 = '/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_adversary_a3c_pensieve-4/0005-raw-score-pro-w0.csv'
+    path2 = '/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_adversary_a3c_pensieve-4/0006-raw-score-pro-w0.csv'
     df0 = pd.read_csv(path0)
     df1 = pd.read_csv(path1)
-    df = pd.concat([df0, df1])
-    scores = moving_average(df['score'].values, 1000)
-    print(max(df['score']))
-    print(max(scores))
-    plt.plot(list(range(1, len(scores) + 1)), scores)
+    df2 = pd.read_csv(path2)
+    df = pd.concat([df1, df2])
+    scores1 = moving_average(df0['score'].values, 1000)
+    scores2 = running_average(df0['score'].values)
+    scores3 = moving_average(df['score'].values, 1000)
+    scores4 = running_average(df['score'].values)
+    plt.plot(list(range(1, len(scores1) + 1)), scores1, label='1000 avg 50k')
+    plt.plot(list(range(1, len(scores2) + 1)), scores2, label='runn avg 50k')
+    plt.plot(list(range(1, len(scores3) + 1)), scores3, label='1000 avg 20k')
+    plt.plot(list(range(1, len(scores4) + 1)), scores4, label='runn avg 20k')
     plt.xlabel('epoch')
     plt.ylabel('score')
+    plt.legend()
+    # plt.ylim([-50, 50])
     plt.show()
+    print(len(df0[df0['score'] > 0]))
+    print(len(np.where(scores1 > 0)))
 
     dfA = pd.DataFrame({
         'A': [1, 2, 3, 4],
@@ -203,6 +221,81 @@ def min_val_a3c():
     # print(dfB)
     # print(pd.concat([dfA, dfB]))
 
+def plotting_raw(path):
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import numpy as np
+    df = pd.read_csv(path)
+    score1 = moving_average(df['score'].values, 100)
+    score2 = moving_average(df['score'].values, 1000)
+    score3 = running_average(df['score'].values)
+    plt.plot(list(range(1, len(score1) + 1)), score1, label='mov avg 100')
+    plt.plot(list(range(1, len(score2) + 1)), score2, label='mov avg 1000')
+    # plt.plot(list(range(1, len(score3) + 1)), score3, label='run avg')
+    plt.xlabel('epoch')
+    plt.ylabel('score')
+    plt.legend()
+    plt.show()
+    plt.plot(list(range(1, len(score1) + 1)), score1, label='mov avg 100')
+    plt.plot(list(range(1, len(score2) + 1)), score2, label='mov avg 1000')
+    # plt.plot(list(range(1, len(score3) + 1)), score3, label='run avg')
+    plt.xlabel('epoch')
+    plt.ylabel('score')
+    plt.legend()
+    plt.ylim([-50, 50])
+    plt.show()
+
+class Testing_some:
+    hello = 'string'
+
+def testing_some():
+    print(Testing_some.hello)
+
+def fetch_time(n):
+    from datetime import datetime
+    import time
+    start = time.perf_counter()
+    for i in range(n):
+        # a = datetime.today().strftime('%d %b %Y %H:%M:%S %p')
+        a = time.time()
+    end = time.perf_counter()
+    print('time taken for', n, end - start)
+
+def adding_time():
+    import datetime
+    now = datetime.datetime.today()
+    SECS_PER_EPOCH = 0.24
+    NUM_EPOCHS = 1000
+    print(f'based on {SECS_PER_EPOCH} secs / epoch, {NUM_EPOCHS} epochs will take {SECS_PER_EPOCH * NUM_EPOCHS} secs, so will finish at {(datetime.timedelta(seconds=SECS_PER_EPOCH * NUM_EPOCHS) + now).strftime("%d %b %Y %H:%M:%S %p")}')
+
+def actions_plot(path_list, label_list):
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    df_list = [pd.read_csv(path) for path in path_list]
+    for df, label in zip(df_list, label_list):
+        plt.plot(list(range(1, len(df) + 1 - 999)), moving_average(df['index'].values, 1000), label=label)
+    # plt.plot([1, 500000], [1.25, 1.25], 'r--')
+    # plt.plot([1, 94000], [2, 2], 'r--')
+    plt.xlabel('step (not epoch - this is 10^5 epochs)')
+    plt.ylabel('action')
+    plt.title('moving average of 1000 over actions across 10^5 epochs')
+    plt.legend()
+    plt.savefig(r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_adversary_a3c_pensieve-4/0018-moving-average-1000-actions-w0-plot.png')
+    plt.show()
+
+def scores_plot(path_list, label_list):
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    df_list = [pd.read_csv(path) for path in path_list]
+    for df, label in zip(df_list, label_list):
+        plt.plot(list(range(1, len(df) + 1 - 999)), moving_average(df['score'].values, 1000), label=label)
+    plt.xlabel('epochs')
+    plt.ylabel('score')
+    plt.title(f'moving average of 1000 over score across {len(df)} epochs')
+    plt.legend()
+    plt.ylim([-50, 50])
+    plt.savefig(r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_adversary_a3c_pensieve-4/0018-moving-average-1000-score-w0-plot-zoom.png')
+    plt.show()
 
 
 if __name__ == '__main__':
@@ -221,4 +314,8 @@ if __name__ == '__main__':
     # numpy_avg()
     # filename()
     # raw_vs_smooth_scores()
-    min_val_a3c()
+    # min_val_a3c()
+    # testing_some()
+    # fetch_time(100000)
+    scores_plot(['/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_adversary_a3c_pensieve-4/0018-raw-score-pro-w0.csv'], ['pro'])
+    # actions_plot([r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_adversary_a3c_pensieve-4/0018-raw-actions-adv-w0.csv', r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_adversary_a3c_pensieve-4/0018-raw-actions-pro-w0.csv'], ['adv', 'pro'])

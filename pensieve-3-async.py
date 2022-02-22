@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 import numpy as np
 import env  # this is actually a file env.py
 import torch
@@ -19,7 +18,6 @@ from datetime import datetime
 from pathlib import Path
 
 
-@dataclass
 class cons:
     S_INFO: int = 6  # bit_rate, buffer_size, next_chunk_size, throughput, time, chunks_left
     S_LEN: int = 8  # how many past chunks to consider
@@ -33,12 +31,11 @@ class cons:
     NN_IN_FEATURES: int = 1
 
 
-@dataclass
 class hyp:  # changing these will theoretically impact the performance of the model
-    NUM_EPOCHS: int = 5000
+    NUM_EPOCHS: int = 200
     ACTOR_LR: float = 0.0001
     CRITIC_LR: float = 0.001
-    NUM_AGENTS: int = 4
+    NUM_AGENTS: int = 2
     TRAIN_SEQ_LEN: int = 100  # train batch size
     RMSPROP_ALPHA: float = 0.9
     RMSPROP_EPS: float = 1e-10
@@ -57,8 +54,11 @@ class hyp:  # changing these will theoretically impact the performance of the mo
     SMOOTH_PENALTY: float = 1.0
     QOE_METRIC: str = 'lin' # other options are 'log' and 'hd'
 
-@dataclass
 class par:  # variables that are not directly related to the model and its performance
+    LOAD_MODEL: bool = False
+    ACTOR_PATH: str = r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_pensieve-3-async/0011-chkpt-actor-50'
+    XAVIER_INIT: bool = True
+    DEVICE: str = 'cpu'  # 'cuda:0' if torch.cuda.is_available() else 'cpu'
     PRINT_EVERY: int = hyp.NUM_EPOCHS // 10
     MODEL_SAVE_EVERY: int = hyp.NUM_EPOCHS // 5
     DATA_PATH: str = r'/mnt/windows_d/Svalbard/Data/Thesis/pensieve_data/cooked_traces/'
@@ -69,8 +69,6 @@ class par:  # variables that are not directly related to the model and its perfo
     save_num: int = len(set([name[:4] for name in os.listdir(SAVE_DIR)])) + 1 if Path(SAVE_DIR).exists() else 0
     SAVE_NUM: str = '0' * (4 - len(str(save_num))) + str(save_num)
     CURR_FILE_PATH: str = os.path.realpath(__file__)
-    LOAD_MODEL: bool = False
-    ACTOR_PATH: str = r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_pensieve-3-async/0011-chkpt-actor-50'
     CRITIC_PATH: str = ACTOR_PATH.replace('-actor-', '-critic-')
     EPOCH_START: int = int(ACTOR_PATH.split('-')[-1]) if LOAD_MODEL else 0
     RAW_SCORE_FILE: str = SAVE_DIR + SAVE_NUM + '-raw-score'
@@ -92,6 +90,23 @@ class Actor(nn.Module):
 
         self.actor_layer_1 = nn.Linear(flattened_input_size, hyp.NUM_HID_NEURONS)
         self.actor_layer_2 = nn.Linear(hyp.NUM_HID_NEURONS, cons.A_DIM)
+
+        # Xavier Uniform Initialization
+        if par.XAVIER_INIT:  # all but the output layer
+            nn.init.xavier_uniform_(self.bitrate.weight.data)
+            nn.init.constant_(self.bitrate.bias.data, 0.0)
+            nn.init.xavier_uniform_(self.buffer_size.weight.data)
+            nn.init.constant_(self.buffer_size.bias.data, 0.0)
+            nn.init.xavier_uniform_(self.throughput.weight.data)
+            nn.init.constant_(self.throughput.bias.data, 0.0)
+            nn.init.xavier_uniform_(self.download_time.weight.data)
+            nn.init.constant_(self.download_time.bias.data, 0.0)
+            nn.init.xavier_uniform_(self.chunk_size.weight.data)
+            nn.init.constant_(self.chunk_size.bias.data, 0.0)
+            nn.init.xavier_uniform_(self.chunks_remaining.weight.data)
+            nn.init.constant_(self.chunks_remaining.bias.data, 0.0)
+            nn.init.xavier_uniform_(self.actor_layer_1.weight.data)
+            nn.init.constant_(self.actor_layer_1.bias.data, 0.0)
 
     def forward(self, state):
         bitrate = hyp.NN_ACT_FN(self.bitrate(state[: , 0: 1, -1]))
@@ -130,6 +145,23 @@ class Critic(nn.Module):
         self.critic_layer_1 = nn.Linear(flattened_input_size, hyp.NUM_HID_NEURONS)
         self.critic_layer_2 = nn.Linear(hyp.NUM_HID_NEURONS, 1)
 
+        # Xavier Uniform Initialization
+        if par.XAVIER_INIT:  # all but the output layer
+            nn.init.xavier_uniform_(self.bitrate.weight.data)
+            nn.init.constant_(self.bitrate.bias.data, 0.0)
+            nn.init.xavier_uniform_(self.buffer_size.weight.data)
+            nn.init.constant_(self.buffer_size.bias.data, 0.0)
+            nn.init.xavier_uniform_(self.throughput.weight.data)
+            nn.init.constant_(self.throughput.bias.data, 0.0)
+            nn.init.xavier_uniform_(self.download_time.weight.data)
+            nn.init.constant_(self.download_time.bias.data, 0.0)
+            nn.init.xavier_uniform_(self.chunk_size.weight.data)
+            nn.init.constant_(self.chunk_size.bias.data, 0.0)
+            nn.init.xavier_uniform_(self.chunks_remaining.weight.data)
+            nn.init.constant_(self.chunks_remaining.bias.data, 0.0)
+            nn.init.xavier_uniform_(self.critic_layer_1.weight.data)
+            nn.init.constant_(self.critic_layer_1.bias.data, 0.0)
+
     def forward(self, state):
         bitrate = hyp.NN_ACT_FN(self.bitrate(state[: , 0: 1, -1]))
         buffer_size = hyp.NN_ACT_FN(self.buffer_size(state[: , 1: 2, -1]))
@@ -156,36 +188,32 @@ def set_seeds():
     torch.cuda.manual_seed_all(hash("so runs are repeatable") % 2**32 - 1)
 
 def central_agent(parameter_queue, experience_queue):
-    torch.set_num_threads(1)
-    actor = torch.load(par.ACTOR_PATH) if par.LOAD_MODEL else Actor()
+    actor = torch.load(par.ACTOR_PATH).to(par.DEVICE) if par.LOAD_MODEL else Actor().to(par.DEVICE)
     actor_criterion = RMSprop(actor.parameters(), lr=hyp.ACTOR_LR, alpha=hyp.RMSPROP_ALPHA, eps=hyp.RMSPROP_EPS)
     actor_criterion.zero_grad()
-    critic = torch.load(par.CRITIC_PATH) if par.LOAD_MODEL else Critic()
+    critic = torch.load(par.CRITIC_PATH).to(par.DEVICE) if par.LOAD_MODEL else Critic().to(par.DEVICE)
     critic_criterion = RMSprop(critic.parameters(), lr=hyp.CRITIC_LR, alpha=hyp.RMSPROP_ALPHA, eps=hyp.RMSPROP_EPS)
     critic_criterion.zero_grad()
     critic_loss_fn = nn.MSELoss()
 
     for epoch in range(hyp.NUM_EPOCHS):
-        actor_parameters = actor.parameters()
+        actor_parameters = list(actor.parameters())
 
         for i in range(hyp.NUM_AGENTS):
-            parameter_queue.put(list(actor_parameters))
+            parameter_queue.put(actor_parameters)
 
         for i in range(hyp.NUM_AGENTS):
-            # DBT: to use CUDA with multiprocessing you need to use the spawn method which I have no clue about
             states, actions, rewards, terminal = experience_queue.get()
-            # DBT: for some reason the pensieve_torch uses torch.cat for states
-            states = torch.cat(states)
-            # DBT: why use a LongTensor
-            actions = torch.LongTensor(actions)  # LongTensor is used for 64 bit signed integers
-            rewards = torch.tensor(np.array(rewards))
-            returns = torch.zeros(rewards.shape)
+            states = torch.cat(states).to(par.DEVICE)
+            actions = torch.LongTensor(actions).to(par.DEVICE)
+            rewards = torch.tensor(np.array(rewards)).to(par.DEVICE)
+            returns = torch.zeros(rewards.shape).to(par.DEVICE)
 
-            returns[-1] = rewards[-1]
+            returns[-1] = rewards[-1]  # you need returns to have grad since you use it for critic
             for t in reversed(range(rewards.shape[0] - 1)):
                 returns[t] = rewards[t] + hyp.DISCOUNT_FACTOR * returns[t + 1]
             with torch.no_grad():
-                values = critic.forward(states).squeeze()
+                values = critic.forward(states).squeeze().to(par.DEVICE)
                 advantage = returns - values
             
             curr_entropy_weight = hyp.INIT_ENTROPY_WT - (epoch + 1) / float(hyp.NUM_EPOCHS) * (hyp.FINAL_ENTROPY_WT - hyp.INIT_ENTROPY_WT)
@@ -204,9 +232,9 @@ def central_agent(parameter_queue, experience_queue):
         if (epoch +1) % par.MODEL_SAVE_EVERY == 0:
             torch.save(actor, par.SAVE_DIR + par.SAVE_NUM + '-chkpt-actor-' + str(par.EPOCH_START + epoch + 1))
             torch.save(critic, par.SAVE_DIR + par.SAVE_NUM + '-chkpt-critic-' + str(par.EPOCH_START + epoch + 1))
+            print('saved actor and critic')
 
 def agent(i, parameter_queue, experience_queue):
-    torch.set_num_threads(1)
     actor = Actor()
 
     environ = env.Environment(par.TIMING_DATA, par.THROUGHPUT_DATA, random_seed=hash(str(time.time()) + str(i)) % 2 ** 32 - 1)
@@ -263,6 +291,8 @@ def agent(i, parameter_queue, experience_queue):
 
         experience_queue.put([states, actions, rewards, end_of_video])
         scores.append(score)
+        if ((epoch + 1) == 10) and (10 % par.PRINT_EVERY != 0):  # just to ensure it is working   
+            print('epoch', par.EPOCH_START + epoch + 1, '/', par.EPOCH_START + hyp.NUM_EPOCHS, 'agent', i, datetime.today().strftime('%d %b %Y %H:%M:%S %p'))
         if (epoch + 1) % par.PRINT_EVERY == 0:
             print('epoch', par.EPOCH_START + epoch + 1, '/', par.EPOCH_START + hyp.NUM_EPOCHS, 'agent', i, datetime.today().strftime('%d %b %Y %H:%M:%S %p'))
     with open(par.RAW_SCORE_FILE + '-w' + str(i) + '.csv', 'w') as f:
@@ -290,8 +320,6 @@ def plot(name, scores):
         plt.savefig(ylim_path, bbox_inches='tight')
 
 def save_state(time_taken, monitor_queue):
-    file_copy_path = par.SAVE_DIR + par.SAVE_NUM + '-code.py'
-    shutil.copyfile(par.CURR_FILE_PATH, file_copy_path)
     with open(par.SAVE_DIR + par.SAVE_NUM + '-hyp_cons_par.csv', 'w') as f:
         f.write('name,value\n')
         [f.write(name + ',' + str(value) + '\n') for name, value in vars(hyp).items() if not name.startswith('__')]
@@ -354,16 +382,22 @@ def create_save_dir():
 
 if __name__ == '__main__':
     # set_seeds()
+    print('started on', datetime.today().strftime('%d %b %Y %H:%M:%S %p'))
+    print('num epochs', hyp.NUM_EPOCHS, 'num agents', hyp.NUM_AGENTS, 'device', par.DEVICE, 'load model', par.LOAD_MODEL, 'batch size', hyp.TRAIN_SEQ_LEN, 'metric', hyp.QOE_METRIC)
+    file_copy_path = par.SAVE_DIR + par.SAVE_NUM + '-code.py'
+    shutil.copyfile(par.CURR_FILE_PATH, file_copy_path)
+    print('running file saved')
+    # mp.set_start_method('spawn')  # to allow using CUDA
     create_save_dir()
     start_time = time.perf_counter()
     parameter_queue = mp.Queue()
     experience_queue = mp.Queue()
 
-    training_ongoing = mp.Value('i')
-    training_ongoing.value = 1
-    monitor_queue = mp.Queue()
-    monitor_process = mp.Process(target=monitor_fn, args=(training_ongoing, monitor_queue))
-    monitor_process.start()
+    # training_ongoing = mp.Value('i')
+    # training_ongoing.value = 1
+    # monitor_queue = mp.Queue()
+    # monitor_process = mp.Process(target=monitor_fn, args=(training_ongoing, monitor_queue))
+    # monitor_process.start()
     
     coordinator = mp.Process(target=central_agent, args=(parameter_queue, experience_queue))
     coordinator.start()
@@ -378,10 +412,11 @@ if __name__ == '__main__':
 
     time_taken = time.perf_counter() - start_time
 
-    training_ongoing.value = 0
+    # training_ongoing.value = 0
     # Sometimes the process does not end for some reason, so I am forcibly terminating it
-    time.sleep(2)  # allow the process to end on its own
-    monitor_process.terminate()
-    monitor_process.join()
-    print('monitor_done')
-    save_state(time_taken, monitor_queue)
+    # time.sleep(2)  # allow the process to end on its own
+    # monitor_process.terminate()
+    # monitor_process.join()
+    # print('monitor_done')
+    # save_state(time_taken, monitor_queue)
+    print(time_taken)
