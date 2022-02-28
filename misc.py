@@ -268,54 +268,127 @@ def adding_time():
     NUM_EPOCHS = 1000
     print(f'based on {SECS_PER_EPOCH} secs / epoch, {NUM_EPOCHS} epochs will take {SECS_PER_EPOCH * NUM_EPOCHS} secs, so will finish at {(datetime.timedelta(seconds=SECS_PER_EPOCH * NUM_EPOCHS) + now).strftime("%d %b %Y %H:%M:%S %p")}')
 
-def actions_plot(path_list, label_list):
+def bitrates_ratio():
+    from statistics import median
+    import numpy as np
+    bitrates = [300, 750, 1200, 1850, 2850, 4300]
+    ratio_sum = [] 
+    for i in range(6):
+        for j in range(i+1, 6):
+            ratio_sum.append(np.log(bitrates[j] / bitrates[i]))
+    print(median(ratio_sum))
+    print(sum(ratio_sum) / 6)
+
+def central_vs_agent_actions():
     import pandas as pd
     import matplotlib.pyplot as plt
-    df_list = [pd.read_csv(path) for path in path_list]
-    for df, label in zip(df_list, label_list):
-        plt.plot(list(range(1, len(df) + 1 - 999)), moving_average(df['index'].values, 1000), label=label)
-    # plt.plot([1, 500000], [1.25, 1.25], 'r--')
-    # plt.plot([1, 94000], [2, 2], 'r--')
-    plt.xlabel('step (not epoch - this is 10^5 epochs)')
-    plt.ylabel('action')
-    plt.title('moving average of 1000 over actions across 10^5 epochs')
+    w0 = r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_pensieve-7/0001-raw-score-w0.csv'
+    w1 = r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_pensieve-7/0001-raw-score-w1.csv'
+    w2 = r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_pensieve-7/0001-raw-score-w2.csv'
+    w3 = r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_pensieve-7/0001-raw-score-w3.csv'
+    ca = r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_pensieve-7/0001-raw-score-central-agent.csv'
+    vw0 = moving_average(pd.read_csv(w0)['score'].values, 10)
+    vw1 = moving_average(pd.read_csv(w1)['score'].values, 10)
+    vw2 = moving_average(pd.read_csv(w2)['score'].values, 10)
+    vw3 = moving_average(pd.read_csv(w3)['score'].values, 10)
+    c = moving_average(pd.read_csv(ca)['score'].values, 10)
+    w = (vw0 + vw1 + vw2 + vw3) / 4
+    x = list(range(1, len(w) + 1))
+    plt.plot(x, w, label='worker')
+    plt.plot(x, c, label='centre')
     plt.legend()
-    plt.savefig(r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_adversary_a3c_pensieve-4/0018-moving-average-1000-actions-w0-plot.png')
     plt.show()
 
-def scores_plot(path_list, label_list):
+def action_score_combined_plot():
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    act_path = r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_pensieve-5/0038-raw-actions-central-agent.csv'
+    scr_path = r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_pensieve-5/0038-raw-score-central-agent.csv'
+    act_df = pd.read_csv(act_path)
+    scr_df = pd.read_csv(scr_path)
+    act_df = (act_df - act_df.mean()) / act_df.std()
+    scr_df = (scr_df - scr_df.mean()) / scr_df.std()
+    plt.plot(list(range(1, len(act_df) - 98)), moving_average(act_df['action'].values, 100), label='action')
+    plt.plot(list(range(1, len(scr_df) - 98)), moving_average(scr_df['score'].values, 100), label='score')
+    plt.legend()
+    plt.ylim([-2, 2])
+    plt.title('action and score normalized for 5k runs')
+    plt.show()
+
+def old_new_plot():
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    oldPath = r'/mnt/windows_d/LibraryOfBabel/Projects/Pensieve/pensieve-pytorch/results/log_central'
+    newPath = r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_pensieve-5/0046-raw-score-central-agent.csv'
+    testPath = r'/mnt/windows_d/LibraryOfBabel/Projects/Pensieve/pensieve-pytorch/results/log_test'
+    new_reward = pd.read_csv(newPath)['score'].values
+    old_reward, test_reward = [], []
+    with open(oldPath, 'r') as f:
+        for line in f.readlines():
+            if 'INFO:root:Epoch:' in line:
+                old_reward.append(float(line.split(' ')[3]))
+    with open(testPath, 'r') as f:
+        for line in f.readlines():
+            test_reward.append(float(line.split('\t')[3]))
+    old_reward = moving_average(old_reward, 100)
+    new_reward = moving_average(new_reward, 100)
+    n_old, n_new, n_test = len(old_reward), len(new_reward), len(test_reward)
+    max_old, max_new, max_test = max(old_reward), max(new_reward), max(test_reward)
+    plt.plot(list(range(1, n_old + 1)), old_reward, 'b-', label='old_reward')
+    # plt.plot(list(range(1, (n_test) * 100, 100)), test_reward, label='test_reward')
+    plt.plot(list(range(1, n_new + 1)), new_reward, 'r-', label='new_reward')
+    plt.plot([1, 4900], [max_old, max_old], 'b--', label='max_other')
+    plt.plot([1, 4900], [max_new, max_new], 'r--', label='max_me')
+    # plt.plot([1, 4900], [max_test, max_test], label='max_test')
+    plt.title(f'mov avg 100 ; max_other {max_old:.2f} max_me {max_new:.2f}')
+    # plt.ylim([-50, 50])
+    plt.legend()
+    plt.xlabel('epochs')
+    plt.ylabel('avg QoE')
+    plt.savefig(r'/mnt/windows_d/LibraryOfBabel/Images/Miscellaneous/thesis/pensieve_pytorch_model0_seed43_vs_me_normal.png')
+    # plt.show()
+
+
+def actions_plot(path_list, label_list, avg_over=1000, save_path=None):
     import pandas as pd
     import matplotlib.pyplot as plt
     df_list = [pd.read_csv(path) for path in path_list]
     for df, label in zip(df_list, label_list):
-        plt.plot(list(range(1, len(df) + 1 - 999)), moving_average(df['score'].values, 1000), label=label)
+        plt.plot(list(range(1, len(df) + 1 - avg_over + 1)), moving_average(df['index'].values, avg_over), label=label)
+        print(len(df))
+    # plt.plot([1, 500000], [1.25, 1.25], 'r--')
+    # plt.plot([1, 94000], [2, 2], 'r--')
+    epochs = max(map(len, df_list))
+    plt.xlabel(f'step (not epoch - this is {epochs} epochs)')
+    plt.ylabel('action')
+    plt.title(f'moving average of {avg_over} over actions across {epochs} epochs')
+    plt.legend()
+    if save_path:
+        plt.savefig(save_path)
+    plt.show()
+
+def scores_plot(path_list, label_list, avg_over=1000, y_lim_low=-100, y_lim_high=100, save_path=None):
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    df_list = [pd.read_csv(path) for path in path_list]
+    max_scores_list = []
+    for df, label in zip(df_list, label_list):
+        scores = moving_average(df['score'].values, avg_over)
+        plt.plot(list(range(1, len(scores) + 1)), scores, label=label)
+        max_scores = max(scores)
+        plt.plot([1, len(scores) + 1], [max_scores, max_scores], label='max ' + label)
+        max_scores_list.append(max_scores)
+    epochs = max(map(len, df_list))
+    plt.plot([0, epochs], [15, 15], label='y=15')
     plt.xlabel('epochs')
     plt.ylabel('score')
-    plt.title(f'moving average of 1000 over score across {len(df)} epochs')
+    plt.title(f'moving average of {avg_over} over score across {epochs} epochs ; {str(max_scores_list)}')
     plt.legend()
-    plt.ylim([-50, 50])
-    plt.savefig(r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_adversary_a3c_pensieve-4/0018-moving-average-1000-score-w0-plot-zoom.png')
+    plt.ylim([y_lim_low, y_lim_high])
+    if save_path:
+        plt.savefig(save_path)
     plt.show()
 
 
 if __name__ == '__main__':
-    # dataclassTest()
-    # queue_1() 
-    # rolling()
-    # rolling_2()
-    # get_vars()
-    # listing()
-    # copy_files()
-    # curr_file_path()
-    # rounding()
-    # monitoring()
-    # spawn()
-    # monitor()
-    # numpy_avg()
-    # filename()
-    # raw_vs_smooth_scores()
-    # min_val_a3c()
-    # testing_some()
-    # fetch_time(100000)
-    scores_plot(['/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_adversary_a3c_pensieve-4/0018-raw-score-pro-w0.csv'], ['pro'])
-    # actions_plot([r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_adversary_a3c_pensieve-4/0018-raw-actions-adv-w0.csv', r'/mnt/windows_d/LibraryOfBabel/Projects/A3C/runs_adversary_a3c_pensieve-4/0018-raw-actions-pro-w0.csv'], ['adv', 'pro'])
+    old_new_plot()

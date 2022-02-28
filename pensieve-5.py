@@ -19,8 +19,12 @@ from pathlib import Path
 import cProfile
 import pstats
 from pstats import SortKey
+import subprocess
 
 
+NUM_EPOCHS = 5000
+NUM_AGENTS = 4
+TRAIN_SEQ_LEN = 100  # train batch size
 S_INFO = 6  # bit_rate, buffer_size, next_chunk_size, throughput, time, chunks_left
 S_LEN = 8  # how many past chunks to consider
 VID_BITRATES = (300, 750, 1200, 1850, 2850, 4300)  # in kbps
@@ -31,11 +35,8 @@ CHUNK_TILL_VIDEO_END_CAP = 48.0  # DBT: should this not be an integer?
 DEFAULT_QUALITY = 1
 CONV_IN_CHANNELS = 1
 NN_IN_FEATURES = 1
-NUM_EPOCHS = 50000
 ACTOR_LR = 0.0001
 CRITIC_LR = 0.001
-NUM_AGENTS = 4
-TRAIN_SEQ_LEN = 100  # train batch size
 RMSPROP_ALPHA = 0.9
 RMSPROP_EPS = 1e-10
 NUM_HID_NEURONS = 128
@@ -66,16 +67,15 @@ MODEL_SAVE_EVERY = NUM_EPOCHS // 5
 DATA_PATH = r'/mnt/windows_d/Svalbard/Data/Thesis/pensieve_data/cooked_traces/'
 TIMING_DATA = tuple(load_trace.load_trace(DATA_PATH)[0])
 THROUGHPUT_DATA = tuple(load_trace.load_trace(DATA_PATH)[1])
-SMOOTHING_AMT = NUM_EPOCHS // 10
-save_num = len(set([name[:4] for name in os.listdir(SAVE_DIR)])) + 1 if Path(SAVE_DIR).exists() else 1
+save_num = max([int(name[:4]) for name in os.listdir(SAVE_DIR)]) + 1 if Path(SAVE_DIR).exists() else 1
 SAVE_NUM = '0' * (4 - len(str(save_num))) + str(save_num)
 CRITIC_PATH = ACTOR_PATH.replace('-actor-', '-critic-')
 EPOCH_START = int(ACTOR_PATH.split('-')[-1]) if LOAD_MODEL else 0
 RAW_SCORE_FILE = SAVE_DIR + SAVE_NUM + '-raw-score'
 RAW_ACTIONS_FILE = SAVE_DIR + SAVE_NUM + '-raw-actions'
-ACTION_GRAPH_SMOOTHING_AMT = 1000
-SEC_PER_EPOCH = 0.125
-
+ACTION_GRAPH_SMOOTHING_AMT = min(NUM_EPOCHS // 10, 1000)
+SCORE_GRAPH_SMOOTHING_AMT = min(NUM_EPOCHS // 10, 1000)
+NUM_VAR_COUNT_ACTS = 10  # the variance of the past 10 bitrates will be used to determine the smoothness
 
 class Actor(nn.Module):
     def __init__(self):
@@ -191,18 +191,25 @@ def central_agent(parameter_queue, experience_queue):
     critic_criterion.zero_grad()
     critic_loss_fn = nn.MSELoss()
 
+    central_agent_scores, central_agent_actions = [], []
+    start_time = datetime.datetime.today()
     for epoch in range(NUM_EPOCHS):
         actor_parameters = list(actor.parameters())
 
         for i in range(NUM_AGENTS):
             parameter_queue.put(actor_parameters)
 
+        total_reward, total_action = 0, 0
         for i in range(NUM_AGENTS):
             states, actions, rewards, terminal = experience_queue.get()
             states = torch.cat(states)
             actions = torch.LongTensor(actions)
             rewards = torch.tensor(np.array(rewards))
             returns = torch.zeros(rewards.shape)
+
+            with torch.no_grad():
+                total_reward += torch.sum(rewards)
+                total_action += torch.sum(actions) / len(actions)
 
             returns[-1] = rewards[-1]  # you need returns to have grad since you use it for critic
             for t in reversed(range(rewards.shape[0] - 1)):
@@ -212,15 +219,15 @@ def central_agent(parameter_queue, experience_queue):
                 advantage = returns - values
             
             curr_entropy_weight = INIT_ENTROPY_WT - (epoch + 1) / float(NUM_EPOCHS) * (INIT_ENTROPY_WT - FINAL_ENTROPY_WT)
-            # curr_entropy_weight = 0.5
             probs = actor.forward(states)
             dist = Categorical(probs)
-            # DBT: there is a - sign for some reason before curr_entropy_weight
             actor_loss = torch.sum(dist.log_prob(actions) * (- advantage)) - curr_entropy_weight * torch.sum(dist.entropy()) 
             actor_loss.backward()
 
             critic_loss = critic_loss_fn(returns, critic.forward(states).squeeze())
             critic_loss.backward()
+        central_agent_scores.append(float(total_reward / NUM_AGENTS))
+        central_agent_actions.append(float(total_action / NUM_AGENTS))
 
         actor_criterion.step()
         actor_criterion.zero_grad()
@@ -230,14 +237,29 @@ def central_agent(parameter_queue, experience_queue):
             torch.save(actor, SAVE_DIR + SAVE_NUM + '-chkpt-actor-' + str(EPOCH_START + epoch + 1))
             torch.save(critic, SAVE_DIR + SAVE_NUM + '-chkpt-critic-' + str(EPOCH_START + epoch + 1))
             print('saved actor and critic')
+        if (epoch + 1) % PRINT_EVERY == 0 or ((epoch + 1) == 10):
+            curr_time = datetime.datetime.today()
+            secs_per_epoch = (curr_time - start_time).seconds / (epoch + 1)
+            remaining_time = datetime.timedelta(seconds = secs_per_epoch * (NUM_EPOCHS - epoch - 1))
+            print('epoch', EPOCH_START + epoch + 1, '/', EPOCH_START + NUM_EPOCHS, 'current time =', curr_time.strftime('%d %b %Y %H:%M:%S %p'), 'secs per epoch', round(secs_per_epoch, 3), 'estimated finishing time =', (curr_time + remaining_time).strftime('%d %b %Y %H:%M:%S %p'))
+    with open(RAW_SCORE_FILE + '-central-agent.csv', 'w') as f:
+        f.write('epoch,score\n')
+        for epoch, qoe in enumerate(central_agent_scores):
+            f.write(str(epoch) + ',' + str(qoe) + '\n')
+    with open(RAW_ACTIONS_FILE + '-central-agent.csv', 'w') as f:
+        f.write('epoch,action\n')
+        for epoch, act in enumerate(central_agent_actions):
+            f.write(str(epoch) + ',' + str(act) + '\n')
+    actions = moving_average(central_agent_actions, n=ACTION_GRAPH_SMOOTHING_AMT)
+    scores = moving_average(central_agent_scores, n=SCORE_GRAPH_SMOOTHING_AMT)
+    plot_scores('central', scores)
+    plot_actions('central', actions)
 
 def agent(i, parameter_queue, experience_queue):
     torch.set_num_threads(1)
     actor = Actor()
 
     environ = env.Environment(TIMING_DATA, THROUGHPUT_DATA, random_seed=hash(str(time.time()) + str(i)) % 2 ** 32 - 1)
-    scores = []
-    chosen_actions = []
     for epoch in range(NUM_EPOCHS):
         global_actor_params = parameter_queue.get()
         for target, source in zip(actor.parameters(), global_actor_params):
@@ -251,7 +273,7 @@ def agent(i, parameter_queue, experience_queue):
 
         delay, sleep_time, buffer_size, rebuf, video_chunk_size, next_video_chunk_sizes, end_of_video, video_chunk_remain = environ.get_video_chunk(curr_bitrate_idx)
 
-        score = 0
+        bitrates_chosen = []
         while not end_of_video and len(states) < TRAIN_SEQ_LEN:
             prev_bitrate_idx = curr_bitrate_idx
 
@@ -268,8 +290,8 @@ def agent(i, parameter_queue, experience_queue):
                 probs = actor.forward(state)
                 dist = Categorical(probs)
                 curr_bitrate_idx = dist.sample().item()
+            bitrates_chosen.append(VID_BITRATES[curr_bitrate_idx])
 
-            chosen_actions.append(curr_bitrate_idx)
             delay, sleep_time, buffer_size, rebuf, video_chunk_size, next_video_chunk_sizes, end_of_video, video_chunk_remain = environ.get_video_chunk(curr_bitrate_idx)
 
             if QOE_METRIC == 'lin':
@@ -283,43 +305,35 @@ def agent(i, parameter_queue, experience_queue):
                 rebuf_penalty = HD_REBUF_PENALTY * rebuf
             smooth_penalty = SMOOTH_PENALTY * np.abs(VID_BITRATES[curr_bitrate_idx] - VID_BITRATES[prev_bitrate_idx]) / 1000.0
             reward = bitrate_reward - rebuf_penalty - smooth_penalty
-            score += reward
+            # this i am adding since I thought not enough emphasis was being placed on smoothness
+            # I used std since it should be on about the same scale as the bitrates and divided it by 1000 to have it be on the same scale as the rest of the variables, just like normal reward calculation was dividing the difference by 1000
+            # danish_smooth_penalty = SMOOTH_PENALTY * np.std(bitrates_chosen[-10:]) / 1000.0
+            # danish_reward = bitrate_reward - rebuf_penalty - danish_smooth_penalty
 
             states.append(state)
             actions.append(curr_bitrate_idx)
             rewards.append(reward)
 
         experience_queue.put([states, actions, rewards, end_of_video])
-        scores.append(score)
-        if ((epoch + 1) == 10) and (10 % PRINT_EVERY != 0):  # just to ensure it is working   
-            print('epoch', EPOCH_START + epoch + 1, '/', EPOCH_START + NUM_EPOCHS, 'agent', i, datetime.datetime.today().strftime('%d %b %Y %H:%M:%S %p'))
-        if (epoch + 1) % PRINT_EVERY == 0:
-            print('epoch', EPOCH_START + epoch + 1, '/', EPOCH_START + NUM_EPOCHS, 'agent', i, datetime.datetime.today().strftime('%d %b %Y %H:%M:%S %p'))
-    with open(RAW_SCORE_FILE + '-w' + str(i) + '.csv', 'w') as f:
-        f.write('epoch,score\n')
-        for ind, val in enumerate(scores):
-            f.write(str(ind + 1) + ',' + str(val) + '\n')
-    with open(RAW_ACTIONS_FILE + '-w' + str(i) + '.csv', 'w') as f:
-        f.write('index\n')
-        for act in chosen_actions:
-            f.write(str(act) + '\n')
-    scores = moving_average(scores, n=SMOOTHING_AMT)
-    chosen_actions = moving_average(chosen_actions, n=ACTION_GRAPH_SMOOTHING_AMT)
-    plot_scores(str(i), scores)
-    plot_actions(str(i), chosen_actions)
+        if (epoch + 1) == NUM_EPOCHS:
+            print('last epoch. waiting for 1 sec for central agent to finish')
+            time.sleep(1)
 
-def moving_average(a, n=SMOOTHING_AMT):
+def moving_average(a, n=1000):
     ret = np.cumsum(np.array(a), dtype=float)
     ret[n:] = ret[n:] - ret[:-n]
     return ret[n - 1:] / n
 
 def plot_scores(name, scores):
-    ylim_path = SAVE_DIR + SAVE_NUM + '-score-zoom_w' + name + '.png'
-    full_path = SAVE_DIR + SAVE_NUM + '-score-full-w' + name + '.png'
-    plt.plot([i for i in range(EPOCH_START + 1, EPOCH_START + len(scores) + 1)], scores)
-    plt.xlabel('episode')
-    plt.ylabel('score')
-    plt.title('worker ' + name)
+    ylim_path = SAVE_DIR + SAVE_NUM + '-score-zoom-' + name + '.png'
+    full_path = SAVE_DIR + SAVE_NUM + '-score-full-' + name + '.png'
+    plt.plot([i for i in range(EPOCH_START + 1, EPOCH_START + len(scores) + 1)], scores, label='QoE')
+    max_score = max(scores)
+    plt.xlabel('epoch')
+    plt.ylabel('moving avg of QoE')
+    plt.title(name + ' max: ' + str(max_score))
+    plt.plot([EPOCH_START + 1, EPOCH_START + len(scores) + 1], [max_score, max_score], label='max QoE')
+    plt.legend()
     plt.savefig(full_path, bbox_inches='tight')
     if max(scores) >= 0:
         plt.ylim([-50, 50])
@@ -327,9 +341,9 @@ def plot_scores(name, scores):
     plt.clf()
 
 def plot_actions(name, actions):
-    path = SAVE_DIR + SAVE_NUM + '-actions_plot-w' + name + '.png'
+    path = SAVE_DIR + SAVE_NUM + '-actions_plot-' + name + '.png'
     plt.plot([i for i in range(EPOCH_START + 1, EPOCH_START + len(actions) + 1)], actions)
-    plt.xlabel('steps (not epochs) over ' + str(NUM_EPOCHS) + ' epochs')
+    plt.xlabel('epochs')
     plt.ylabel('average of actions taken (0 to 5 incl. only integers)')
     plt.title('worker ' + name + ' actions with moving average of ' + str(ACTION_GRAPH_SMOOTHING_AMT))
     plt.savefig(path, bbox_inches='tight')
@@ -415,8 +429,8 @@ def agent_profiler(index, parameter_queue, experience_queue):
         p.sort_stats('calls').print_stats()
 
 def preliminaries():
-    variable_names = ['S_INFO', 'S_LEN', 'VID_BITRATES', 'A_DIM', 'HD_REWARD', 'BUFFER_NORM_FACTOR', 'CHUNK_TILL_VIDEO_END_CAP', 'DEFAULT_QUALITY', 'CONV_IN_CHANNELS', 'NN_IN_FEATURES', 'ACTOR_LR', 'CRITIC_LR', 'TRAIN_SEQ_LEN', 'RMSPROP_ALPHA', 'RMSPROP_EPS', 'NUM_HID_NEURONS', 'NUM_CONV_CHANNELS', 'CONV_KERNEL_SIZE', 'CONV_STRIDE', 'CONV_PADDING', 'NN_ACT_FN', 'DISCOUNT_FACTOR', 'INIT_ENTROPY_WT', 'FINAL_ENTROPY_WT', 'LIN_REBUF_PENALTY', 'LOG_REBUF_PENALTY', 'HD_REBUF_PENALTY', 'SMOOTH_PENALTY', 'DATA_PATH', 'SAVE_DIR', 'SAVE_NUM', 'RAW_SCORE_FILE', 'RAW_ACTIONS_FILE', 'CURR_FILE_PATH', 'ACTOR_PATH', 'CRITIC_PATH', 'LOAD_MODEL', 'EPOCH_START', 'QOE_METRIC', 'NUM_EPOCHS', 'PRINT_EVERY', 'SMOOTHING_AMT', 'MODEL_SAVE_EVERY', 'USE_GPU', 'DEVICE', 'NUM_AGENTS', 'DO_PROFILING', 'SET_SEEDS', 'MONITOR_PC_STATS']
-    variable_values = [S_INFO, S_LEN, VID_BITRATES, A_DIM, HD_REWARD, BUFFER_NORM_FACTOR, CHUNK_TILL_VIDEO_END_CAP, DEFAULT_QUALITY, CONV_IN_CHANNELS, NN_IN_FEATURES, ACTOR_LR, CRITIC_LR, TRAIN_SEQ_LEN, RMSPROP_ALPHA, RMSPROP_EPS, NUM_HID_NEURONS, NUM_CONV_CHANNELS, CONV_KERNEL_SIZE, CONV_STRIDE, CONV_PADDING, NN_ACT_FN, DISCOUNT_FACTOR, INIT_ENTROPY_WT, FINAL_ENTROPY_WT, LIN_REBUF_PENALTY, LOG_REBUF_PENALTY, HD_REBUF_PENALTY, SMOOTH_PENALTY, DATA_PATH, SAVE_DIR, SAVE_NUM, RAW_SCORE_FILE, RAW_ACTIONS_FILE, CURR_FILE_PATH, ACTOR_PATH, CRITIC_PATH, LOAD_MODEL, EPOCH_START, QOE_METRIC, NUM_EPOCHS, PRINT_EVERY, SMOOTHING_AMT, MODEL_SAVE_EVERY, USE_GPU, DEVICE, NUM_AGENTS, DO_PROFILING, SET_SEEDS, MONITOR_PC_STATS]
+    variable_names = ['S_INFO', 'S_LEN', 'VID_BITRATES', 'A_DIM', 'HD_REWARD', 'BUFFER_NORM_FACTOR', 'CHUNK_TILL_VIDEO_END_CAP', 'DEFAULT_QUALITY', 'CONV_IN_CHANNELS', 'NN_IN_FEATURES', 'ACTOR_LR', 'CRITIC_LR', 'TRAIN_SEQ_LEN', 'RMSPROP_ALPHA', 'RMSPROP_EPS', 'NUM_HID_NEURONS', 'NUM_CONV_CHANNELS', 'CONV_KERNEL_SIZE', 'CONV_STRIDE', 'CONV_PADDING', 'NN_ACT_FN', 'DISCOUNT_FACTOR', 'INIT_ENTROPY_WT', 'FINAL_ENTROPY_WT', 'LIN_REBUF_PENALTY', 'LOG_REBUF_PENALTY', 'HD_REBUF_PENALTY', 'SMOOTH_PENALTY', 'DATA_PATH', 'SAVE_DIR', 'SAVE_NUM', 'RAW_SCORE_FILE', 'RAW_ACTIONS_FILE', 'CURR_FILE_PATH', 'ACTOR_PATH', 'CRITIC_PATH', 'LOAD_MODEL', 'EPOCH_START', 'QOE_METRIC', 'NUM_EPOCHS', 'PRINT_EVERY', 'MODEL_SAVE_EVERY', 'USE_GPU', 'DEVICE', 'NUM_AGENTS', 'DO_PROFILING', 'SET_SEEDS', 'MONITOR_PC_STATS', 'ACTION_GRAPH_SMOOTHING_AMT', 'SCORE_GRAPH_SMOOTHING_AMT']
+    variable_values = [S_INFO, S_LEN, VID_BITRATES, A_DIM, HD_REWARD, BUFFER_NORM_FACTOR, CHUNK_TILL_VIDEO_END_CAP, DEFAULT_QUALITY, CONV_IN_CHANNELS, NN_IN_FEATURES, ACTOR_LR, CRITIC_LR, TRAIN_SEQ_LEN, RMSPROP_ALPHA, RMSPROP_EPS, NUM_HID_NEURONS, NUM_CONV_CHANNELS, CONV_KERNEL_SIZE, CONV_STRIDE, CONV_PADDING, NN_ACT_FN, DISCOUNT_FACTOR, INIT_ENTROPY_WT, FINAL_ENTROPY_WT, LIN_REBUF_PENALTY, LOG_REBUF_PENALTY, HD_REBUF_PENALTY, SMOOTH_PENALTY, DATA_PATH, SAVE_DIR, SAVE_NUM, RAW_SCORE_FILE, RAW_ACTIONS_FILE, CURR_FILE_PATH, ACTOR_PATH, CRITIC_PATH, LOAD_MODEL, EPOCH_START, QOE_METRIC, NUM_EPOCHS, PRINT_EVERY, MODEL_SAVE_EVERY, USE_GPU, DEVICE, NUM_AGENTS, DO_PROFILING, SET_SEEDS, MONITOR_PC_STATS, ACTION_GRAPH_SMOOTHING_AMT, SCORE_GRAPH_SMOOTHING_AMT]
     # Setting seeds
     if SET_SEEDS:
         torch.backends.cudnn.deterministic, 
@@ -429,7 +443,6 @@ def preliminaries():
     now = datetime.datetime.today()
     print('started on', now.strftime('%d %b %Y %H:%M:%S %p'))
     print('num epochs', NUM_EPOCHS, 'num agents', NUM_AGENTS, 'device', DEVICE, 'load model', LOAD_MODEL, 'batch size', TRAIN_SEQ_LEN, 'metric', QOE_METRIC)
-    print(f'based on {SECS_PER_EPOCH} secs / epoch, {NUM_EPOCHS} epochs will take {SECS_PER_EPOCH * NUM_EPOCHS} secs, so will finish at {(datetime.timedelta(seconds=SECS_PER_EPOCH * NUM_EPOCHS) + now).strftime("%d %b %Y %H:%M:%S %p")}')
 
 
     # create save directory if it does not exist
@@ -452,8 +465,7 @@ def preliminaries():
     if DEVICE == 'cuda:0':
         mp.set_start_method('spawn')
 
-
-if __name__ == '__main__':
+def main():
     preliminaries()
 
     start_time = time.perf_counter()
@@ -489,3 +501,11 @@ if __name__ == '__main__':
         monitor_process.join()
         print('monitor_done')
     save_state(time_taken, monitor_queue if MONITOR_PC_STATS else None)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    finally:
+        subprocess.run("mpv /home/danish/Downloads/beep1.wav", shell=True)
+
